@@ -6,8 +6,16 @@ node_modules/
 __pycache__/
 target/
 dist/
+!web/dist/
+!web/dist/**
 build/
 *.log
+# 本项目运行产物
+*.db
+*.db-shm
+*.db-wal
+/kiosk
+/kiosk-bin
 .claude/
 .cc-workbench/
 轨迹/
