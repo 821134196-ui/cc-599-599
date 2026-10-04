@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>报刊亭期刊订阅系统</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <header>
+      <h1>📰 报刊亭期刊订阅系统</h1>
+      <nav>
+        <button v-for="t in tabs" :key="t.key"
+                :class="{active: tab === t.key}"
+                @click="tab = t.key">{{ t.label }}</button>
+      </nav>
+    </header>
+
+    <div v-if="toast" class="toast" :class="toastType">{{ toast }}</div>
+
+    <!-- ══════════ 读者页 ══════════ -->
+    <section v-if="tab === 'reader'">
+      <div class="bar">
+        <label>选择订户：</label>
+        <select v-model="selectedSubId" @change="loadReaderView">
+          <option v-for="s in subscriptions" :key="s.id" :value="s.id">
+            {{ s.reader_name }} · {{ s.publication.name }} · {{ s.total_periods }}期
+            （{{ subStatusLabel(s.status) }}）
+          </option>
+        </select>
+      </div>
+
+      <div v-if="readerView" class="reader-view">
+        <div class="cards">
+          <div class="card"><b>{{ readerView.summary.total_periods }}</b><span>签约总期数</span></div>
+          <div class="card ok"><b>{{ readerView.summary.fulfilled_periods }}</b><span>已履约期数</span></div>
+          <div class="card"><b>{{ readerView.summary.picked_periods }}</b><span>已领取</span></div>
+          <div class="card"><b>{{ readerView.summary.arrived_periods }}</b><span>已到刊待领取</span></div>
+          <div class="card warn"><b>{{ readerView.summary.missing_periods }}</b><span>缺刊/待补发</span></div>
+          <div class="card"><b>{{ readerView.summary.pending_periods }}</b><span>待到刊</span></div>
+          <div class="card money"><b>{{ yuan(readerView.summary.paid_cents) }}</b><span>已付款</span></div>
+          <div class="card money" v-if="readerView.refund"><b>{{ yuan(readerView.summary.refund_cents) }}</b><span>已退款</span></div>
+        </div>
+        <p class="meta">
+          刊物：{{ readerView.subscription.publication.name }}（单价 {{ yuan(readerView.subscription.unit_price_cents) }}/期）
+          ｜ 起始期：{{ readerView.subscription.start_issue_no }}
+          ｜ 当前取刊方式：{{ pickupLabel(readerView.subscription.pickup_method) }}
+        </p>
+
+        <h3>逐期履约记录</h3>
+        <table>
+          <thead>
+            <tr><th>期号</th><th>折算期数</th><th>状态</th><th>取刊方式</th><th>到刊时间</th><th>签收</th><th>备注</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="f in readerView.fulfillments" :key="f.id" :class="'st-' + f.status">
+              <td>{{ f.issue_no }}</td>
+              <td>{{ f.counts_as }}<span v-if="f.counts_as > 1" class="tag">合刊</span></td>
+              <td><span class="badge" :class="'b-' + f.status">{{ statusLabel(f.status) }}</span></td>
+              <td>{{ pickupLabel(f.pickup_method) }}</td>
+              <td>{{ fmtTime(f.arrived_at) }}</td>
+              <td>{{ f.picked_by ? f.picked_by + ' ' + fmtTime(f.picked_at) : '—' }}</td>
+              <td><span v-if="f.reissued" class="tag reissue">补发件</span></td>
+            </tr>
+          </tbody>
+        </table>
+
+        <template v-if="readerView.refund">
+          <h3>停刊退款明细</h3>
+          <p class="meta">
+            退款原因：{{ readerView.refund.reason }} ｜
+            未履约 {{ readerView.refund.unfulfilled_periods }} 期 × {{ yuan(readerView.refund.unit_price_cents) }}
+            = <b>{{ yuan(readerView.refund.amount_cents) }}</b>
+          </p>
+          <table>
+            <thead><tr><th>期号</th><th>折算期数</th><th>退款金额</th></tr></thead>
+            <tbody>
+              <tr v-for="it in readerView.refund.items" :key="it.id">
+                <td>{{ it.issue_no }}</td><td>{{ it.counts_as }}</td><td>{{ yuan(it.amount_cents) }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+      </div>
+    </section>
+
+    <!-- ══════════ 店员台 ══════════ -->
+    <section v-if="tab === 'staff'">
+      <div class="panels">
+        <!-- 登记到货 -->
+        <div class="panel">
+          <h3>① 登记到货</h3>
+          <label>刊物</label>
+          <select v-model="arrival.publication_id" @change="loadSchedule">
+            <option v-for="p in publications" :key="p.id" :value="p.id">{{ p.name }}</option>
+          </select>
+          <label>期号</label>
+          <select v-model="arrival.issue_no" @change="suggestKey">
+            <option v-for="it in schedule" :key="it.issue_no" :value="it.issue_no">
+              {{ it.issue_no }}（计 {{ it.counts_as }} 期）
+            </option>
+          </select>
+          <label>数量</label>
+          <input type="number" min="1" v-model.number="arrival.quantity">
+          <label>幂等键（重复提交只生效一次）</label>
+          <input v-model="arrival.idempotency_key">
+          <button @click="registerArrival">登记到货</button>
+        </div>
+
+        <!-- 新订阅 -->
+        <div class="panel">
+          <h3>② 新订阅</h3>
+          <label>读者姓名</label><input v-model="newSub.reader_name">
+          <label>刊物</label>
+          <select v-model="newSub.publication_id">
+            <option v-for="p in publications" :key="p.id" :value="p.id">{{ p.name }}</option>
+          </select>
+          <label>起始期号</label>
+          <select v-model="newSub.start_issue_no">
+            <option v-for="it in schedulesOf(newSub.publication_id)" :key="it.issue_no" :value="it.issue_no">
+              {{ it.issue_no }}<template v-if="it.counts_as > 1">（合刊计 {{ it.counts_as }} 期）</template>
+            </option>
+          </select>
+          <label>签约期数</label><input type="number" min="1" v-model.number="newSub.total_periods">
+          <label>取刊方式</label>
+          <select v-model="newSub.pickup_method">
+            <option value="self">到店自取</option>
+            <option value="delivery">配送上门</option>
+          </select>
+          <button @click="createSub">创建订阅</button>
+        </div>
+
+        <!-- 调整取刊方式 -->
+        <div class="panel">
+          <h3>③ 调整取刊方式（仅对未来刊期生效）</h3>
+          <label>订户</label>
+          <select v-model="pmSubId">
+            <option v-for="s in subscriptions" :key="s.id" :value="s.id">
+              {{ s.reader_name }} · {{ s.publication.name }}
+            </option>
+          </select>
+          <label>新方式</label>
+          <select v-model="pmMethod">
+            <option value="self">到店自取</option>
+            <option value="delivery">配送上门</option>
+          </select>
+          <button @click="changePickupMethod">调整</button>
+        </div>
+
+        <!-- 停刊 -->
+        <div class="panel danger">
+          <h3>④ 刊物停刊</h3>
+          <label>刊物</label>
+          <select v-model="suspendPubId">
+            <option v-for="p in publications" :key="p.id" :value="p.id">{{ p.name }}（{{ p.status === 'active' ? '在刊' : '已停刊' }}）</option>
+          </select>
+          <label>停刊原因</label><input v-model="suspendReason">
+          <button class="danger" @click="suspendPub">停刊并生成退款</button>
+          <div v-if="suspendResult.length" class="refund-result">
+            <div v-for="r in suspendResult" :key="r.id">
+              退款单 #{{ r.id }}：未履约 {{ r.unfulfilled_periods }} 期 × {{ yuan(r.unit_price_cents) }}
+              = <b>{{ yuan(r.amount_cents) }}</b>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 履约看板 -->
+      <h3>履约看板
+        <select v-model="boardPubId" @change="loadFulfillments">
+          <option value="">全部刊物</option>
+          <option v-for="p in publications" :key="p.id" :value="String(p.id)">{{ p.name }}</option>
+        </select>
+      </h3>
+      <table>
+        <thead>
+          <tr><th>读者</th><th>期号</th><th>折算</th><th>状态</th><th>取刊方式</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="f in fulfillments" :key="f.id" :class="'st-' + f.status">
+            <td>{{ f.reader_name }}</td>
+            <td>{{ f.issue_no }}</td>
+            <td>{{ f.counts_as }}</td>
+            <td>
+              <span class="badge" :class="'b-' + f.status">{{ statusLabel(f.status) }}</span>
+              <span v-if="f.reissued" class="tag reissue">补发件</span>
+            </td>
+            <td>{{ pickupLabel(f.pickup_method) }}</td>
+            <td class="ops">
+              <button v-if="f.status === 'arrived'" @click="pickup(f)">签收</button>
+              <button v-if="f.status === 'pending'" @click="markMissing(f)">登记缺刊</button>
+              <button v-if="f.status === 'missing'" @click="requestReissue(f)">申请补发</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- 补发申请 -->
+      <h3>补发申请（出版社回执为本地模拟）</h3>
+      <table>
+        <thead>
+          <tr><th>#</th><th>期号</th><th>数量</th><th>状态</th><th>回执号</th><th>操作</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="r in reissueRequests" :key="r.id">
+            <td>{{ r.id }}</td>
+            <td>{{ r.issue_no }}</td>
+            <td>{{ r.quantity }}</td>
+            <td>{{ r.status === 'requested' ? '待补发' : '已收到补发件' }}</td>
+            <td>{{ r.receipt_no || '—' }}</td>
+            <td class="ops">
+              <button v-if="r.status === 'requested'" @click="simulateReceipt(r)">模拟出版社回执</button>
+              <button v-else @click="simulateReceipt(r)">重发同一回执（验证幂等）</button>
+            </td>
+          </tr>
+          <tr v-if="!reissueRequests.length"><td colspan="6" class="empty">暂无补发申请</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ══════════ 库存页 ══════════ -->
+    <section v-if="tab === 'inventory'">
+      <h3>刊期库存</h3>
+      <table>
+        <thead>
+          <tr><th>刊物</th><th>期号</th><th>累计到货</th><th>其中补发</th><th>已分配</th><th>已领取</th><th>可分配</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="inv in inventories" :key="inv.id">
+            <td>{{ pubName(inv.publication_id) }}</td>
+            <td>{{ inv.issue_no }}</td>
+            <td>{{ inv.arrived_qty }}</td>
+            <td>{{ inv.reissue_qty }}</td>
+            <td>{{ inv.allocated_qty }}</td>
+            <td>{{ inv.picked_qty }}</td>
+            <td>{{ inv.available }}</td>
+          </tr>
+          <tr v-if="!inventories.length"><td colspan="7" class="empty">暂无到货</td></tr>
+        </tbody>
+      </table>
+
+      <h3>刊期表（签约折算规则）</h3>
+      <div v-for="p in publications" :key="p.id" class="sched">
+        <h4>{{ p.name }}（{{ yuan(p.unit_price_cents) }}/期）
+          <span class="badge" :class="p.status === 'active' ? 'b-picked' : 'b-refunded'">
+            {{ p.status === 'active' ? '在刊' : '已停刊' }}
+          </span>
+        </h4>
+        <span v-for="it in schedulesOf(p.id)" :key="it.issue_no"
+              class="chip" :class="{combined: it.counts_as > 1}">
+          {{ it.issue_no }}<template v-if="it.counts_as > 1"> ×{{ it.counts_as }}期</template>
+        </span>
+      </div>
+    </section>
+  </div>
+
+  <script src="/vue.global.prod.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
